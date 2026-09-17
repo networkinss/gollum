@@ -1,0 +1,20 @@
+Gollum
+Copyright 2026 Oliver Glas
+
+This product is licensed under the Apache License, Version 2.0, with an
+additional field-of-use restriction — see LICENSE for the full text of both.
+
+This product includes software developed by third parties:
+
+- llama-go (https://github.com/tcpipuk/llama-go)
+  Copyright (c) 2023 go-skynet authors
+  Licensed under the MIT License. Used via `//go:build llm`; not linked
+  into the default (non-CGO) build. See third_party/llama-go/LICENSE in
+  that project's own distribution for the full text.
+
+- llama.cpp (https://github.com/ggml-org/llama.cpp)
+  Licensed under the MIT License. Bundled transitively by llama-go under
+  the same build tag as above.
+
+The contents of this NOTICE file are for informational purposes only and
+do not modify the License.

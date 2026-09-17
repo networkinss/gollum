@@ -1,6 +1,7 @@
 package gollum
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -97,6 +98,83 @@ func (o *ollamaBackend) Analyze(ctx context.Context, systemPrompt, userPrompt st
 		return "", fmt.Errorf("ollama: %s", result.Error)
 	}
 	return result.Response, nil
+}
+
+// AnalyzeStream streams tokens from /api/generate as they're produced.
+//
+// Ollama's streaming response is newline-delimited JSON: one object per
+// token/chunk, with a final object carrying Done=true. Returning false from
+// onToken, or cancelling ctx, cancels the underlying HTTP request so the
+// server stops generating rather than the client just stopping reading.
+func (o *ollamaBackend) AnalyzeStream(ctx context.Context, systemPrompt, userPrompt string, onToken func(string) bool) error {
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	reqBody := ollamaGenerateRequest{
+		Model:  o.model,
+		System: systemPrompt,
+		Prompt: userPrompt,
+		Stream: true,
+		Options: map[string]any{
+			"num_predict": o.maxTokens,
+		},
+	}
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("ollama: failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(streamCtx, http.MethodPost, o.endpoint+"/api/generate", bytes.NewReader(jsonBody))
+	if err != nil {
+		return fmt.Errorf("ollama: failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := o.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("ollama: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("ollama: server returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		var chunk ollamaGenerateResponse
+		if err := json.Unmarshal(line, &chunk); err != nil {
+			return fmt.Errorf("ollama: failed to parse stream chunk: %w", err)
+		}
+		if chunk.Error != "" {
+			return fmt.Errorf("ollama: %s", chunk.Error)
+		}
+
+		if chunk.Response != "" && !onToken(chunk.Response) {
+			return nil
+		}
+		if chunk.Done {
+			return nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("ollama: failed to read stream: %w", err)
+	}
+	return nil
 }
 
 func (o *ollamaBackend) Available() bool {

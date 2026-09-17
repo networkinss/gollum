@@ -30,6 +30,31 @@ type Backend interface {
 	Close() error
 }
 
+// StreamingBackend is an additive capability: a Backend that can also deliver
+// tokens incrementally as they're generated, instead of only the final result.
+//
+// Both built-in backends (Ollama, embedded) implement this; callers that need
+// streaming should type-assert a Backend to StreamingBackend (or use
+// AsStreamingBackend) rather than assuming it unconditionally, since a future
+// or third-party Backend implementation may only implement the base interface.
+type StreamingBackend interface {
+	Backend
+	// AnalyzeStream sends a system prompt and user prompt to the LLM and calls
+	// onToken for each generated token as it arrives. onToken returns true to
+	// continue generation or false to stop early.
+	//
+	// Cancelling ctx stops generation promptly: implementations must check ctx
+	// between tokens and return ctx.Err() rather than running to completion.
+	AnalyzeStream(ctx context.Context, systemPrompt, userPrompt string, onToken func(string) bool) error
+}
+
+// AsStreamingBackend type-asserts b to StreamingBackend, returning ok=false if
+// the concrete backend doesn't support streaming.
+func AsStreamingBackend(b Backend) (StreamingBackend, bool) {
+	sb, ok := b.(StreamingBackend)
+	return sb, ok
+}
+
 // Config holds LLM backend configuration.
 type Config struct {
 	// Backend selection: "auto", "embedded", "ollama", "remote".

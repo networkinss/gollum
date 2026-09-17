@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 
 	llama "github.com/tcpipuk/llama-go"
@@ -57,7 +58,25 @@ func (e *embeddedBackend) Name() string {
 	return "embedded@" + e.cfg.ModelPath
 }
 
-func (e *embeddedBackend) Analyze(_ context.Context, systemPrompt, userPrompt string) (string, error) {
+func (e *embeddedBackend) Analyze(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
+	var sb strings.Builder
+	err := e.AnalyzeStream(ctx, systemPrompt, userPrompt, func(token string) bool {
+		sb.WriteString(token)
+		return true
+	})
+	if err != nil {
+		return "", err
+	}
+	return sb.String(), nil
+}
+
+// AnalyzeStream streams tokens via llama-go's GenerateStream callback.
+//
+// llama.cpp's decode loop has no built-in cancellation, so ctx is checked
+// between tokens: returning false from the callback (either because onToken
+// asked to stop or ctx was cancelled) halts generation at the next token
+// boundary rather than running to completion.
+func (e *embeddedBackend) AnalyzeStream(ctx context.Context, systemPrompt, userPrompt string, onToken func(string) bool) error {
 	prompt := systemPrompt + "\n\n" + userPrompt
 
 	maxTokens := e.cfg.MaxTokens
@@ -65,16 +84,21 @@ func (e *embeddedBackend) Analyze(_ context.Context, systemPrompt, userPrompt st
 		maxTokens = 512
 	}
 
-	result, err := e.ctx.Generate(prompt,
+	err := e.ctx.GenerateStream(prompt, func(token string) bool {
+		if ctx.Err() != nil {
+			return false
+		}
+		return onToken(token)
+	},
 		llama.WithMaxTokens(maxTokens),
 		llama.WithTemperature(0.3),
 		llama.WithTopK(40),
 		llama.WithTopP(0.9),
 	)
 	if err != nil {
-		return "", fmt.Errorf("embedded: inference failed: %w", err)
+		return fmt.Errorf("embedded: inference failed: %w", err)
 	}
-	return result, nil
+	return ctx.Err()
 }
 
 func (e *embeddedBackend) Available() bool {

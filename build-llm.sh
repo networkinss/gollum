@@ -17,10 +17,13 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LLAMA_DIR="${SCRIPT_DIR}/third_party/llama-go"
 
-# Edithor pins llama-go to the snapshot agippy's shipped archive was built
-# from (2026-05-08, last commit on Go 1.26.2, static linkage by default). third_party/ is gitignored — this script clones it.
-# Moving the pin forward moves the Go toolchain too: llama-go HEAD requires
-# Go 1.27 (docs/PRO_EDITION.md, "Vendoring gollum").
+# Gollum pins llama-go to the last commit on Go 1.26.2 with static linkage by
+# default (2026-05-03); anything earlier links dynamically and the resulting
+# binary won't start (check with ldd). third_party/ is gitignored — this
+# script clones it. Moving the pin forward may move the Go toolchain
+# requirement too — check llama-go's own go.mod at the new pin before bumping
+# LLAMA_PIN, and update go.mod's require line to the matching pseudo-version
+# in the same change (see CLAUDE.md, "The llama-go pin").
 LLAMA_REPO="https://github.com/tcpipuk/llama-go"
 LLAMA_PIN="b8a6878"
 

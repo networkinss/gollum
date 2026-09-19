@@ -27,9 +27,11 @@ Practical implications for anyone touching this repo:
 
 ## Consumers
 
-edith and agippy both vendor a copy of this source under `libs/gollum/` (or similar) via a `replace github.com/networkinss/gollum => ./libs/gollum` in their own `go.mod`. Once this repo has a tagged release, the intended end state is both consumers dropping the `replace` and pinning a real version. Until then:
-- A behavioural change here should be manually back-ported to both copies (or, better, prompt the user to move a consumer to `go get` this repo instead of continuing to hand-sync).
-- Don't assume either consumer's copy is current — diff before trusting it as a reference.
+**edith has moved off the vendored copy** (2026-09-17): it now has a real `require github.com/networkinss/gollum v0.1.0` in its `go.mod`, and `libs/gollum/` is deleted. Only the llama-go `replace` remains on its side, which is needed for the local CGO build regardless.
+
+agippy's status is unverified from here — check before assuming, and it may still carry a `replace` to a vendored copy.
+
+The practical consequence: **a change in this repo does not reach edith until it is pushed and tagged.** There is no `replace` bridging them any more, so "it works locally" means the local checkout, not the consumer. Bump the tag and the consumer's `require` in the same change, or the consumer silently keeps the old behaviour.
 
 ## Interface stability
 

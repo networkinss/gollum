@@ -70,7 +70,7 @@ func TestOllamaAnalyzeStream_TokensInOrder(t *testing.T) {
 	srv, _ := newStreamingTestServer([]string{"Hello", ",", " world"}, 0)
 	defer srv.Close()
 
-	b, err := newOllamaBackend(srv.URL, "test-model", 10)
+	b, err := newOllamaBackend(srv.URL, "test-model", 10, "", 0)
 	if err != nil {
 		t.Fatalf("newOllamaBackend: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestOllamaAnalyzeStream_EarlyStopViaOnToken(t *testing.T) {
 	srv, cancelled := newStreamingTestServer([]string{"a", "b", "c", "d", "e"}, 20*time.Millisecond)
 	defer srv.Close()
 
-	b, err := newOllamaBackend(srv.URL, "test-model", 10)
+	b, err := newOllamaBackend(srv.URL, "test-model", 10, "", 0)
 	if err != nil {
 		t.Fatalf("newOllamaBackend: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestOllamaAnalyzeStream_ContextCancellation(t *testing.T) {
 	srv, cancelled := newStreamingTestServer([]string{"a", "b", "c", "d", "e"}, 30*time.Millisecond)
 	defer srv.Close()
 
-	b, err := newOllamaBackend(srv.URL, "test-model", 10)
+	b, err := newOllamaBackend(srv.URL, "test-model", 10, "", 0)
 	if err != nil {
 		t.Fatalf("newOllamaBackend: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestOllamaAnalyzeStream_ServerError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	b, err := newOllamaBackend(srv.URL, "test-model", 10)
+	b, err := newOllamaBackend(srv.URL, "test-model", 10, "", 0)
 	if err != nil {
 		t.Fatalf("newOllamaBackend: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestOllamaAnalyze_NonStreaming(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	b, err := newOllamaBackend(srv.URL, "test-model", 10)
+	b, err := newOllamaBackend(srv.URL, "test-model", 10, "", 0)
 	if err != nil {
 		t.Fatalf("newOllamaBackend: %v", err)
 	}
@@ -188,5 +188,137 @@ func TestOllamaAnalyze_NonStreaming(t *testing.T) {
 	}
 	if got != "hello there" {
 		t.Errorf("Analyze = %q, want %q", got, "hello there")
+	}
+}
+
+// captureAuth serves a minimal /api/generate and records the Authorization
+// header it was sent.
+func captureAuth(t *testing.T, seen *string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*seen = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"response":"ok","done":true}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestOllamaSendsBearerTokenWhenConfigured(t *testing.T) {
+	var seen string
+	srv := captureAuth(t, &seen)
+
+	b, err := newOllamaBackend(srv.URL, "test-model", 10, "sk-test-123", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Analyze(context.Background(), "sys", "user"); err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if seen != "Bearer sk-test-123" {
+		t.Errorf("Authorization = %q, want %q", seen, "Bearer sk-test-123")
+	}
+}
+
+// A local daemon needs no token, and sending an empty one would be wrong.
+func TestOllamaSendsNoAuthHeaderWithoutAKey(t *testing.T) {
+	var seen string
+	srv := captureAuth(t, &seen)
+
+	b, err := newOllamaBackend(srv.URL, "test-model", 10, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Analyze(context.Background(), "sys", "user"); err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if seen != "" {
+		t.Errorf("Authorization = %q, want no header at all", seen)
+	}
+}
+
+// The streaming path must authenticate too — it is a separate request.
+func TestOllamaStreamSendsBearerToken(t *testing.T) {
+	var seen string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Write([]byte(`{"response":"hi","done":false}` + "\n" + `{"response":"","done":true}` + "\n"))
+	}))
+	defer srv.Close()
+
+	b, err := newOllamaBackend(srv.URL, "test-model", 10, "sk-stream", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.AnalyzeStream(context.Background(), "sys", "user", func(string) bool { return true }); err != nil {
+		t.Fatalf("AnalyzeStream: %v", err)
+	}
+	if seen != "Bearer sk-stream" {
+		t.Errorf("Authorization = %q, want %q", seen, "Bearer sk-stream")
+	}
+}
+
+// Available() pings /api/version. A hosted endpoint answers an unauthenticated
+// ping with 401, which would report a working backend as down.
+func TestOllamaAvailableSendsBearerToken(t *testing.T) {
+	var seen string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.Header.Get("Authorization")
+		if r.Header.Get("Authorization") == "" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Write([]byte(`{"version":"0.1.0"}`))
+	}))
+	defer srv.Close()
+
+	b, err := newOllamaBackend(srv.URL, "test-model", 10, "sk-ping", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !b.Available() {
+		t.Error("Available() = false against a server that requires auth")
+	}
+	if seen != "Bearer sk-ping" {
+		t.Errorf("Authorization = %q, want %q", seen, "Bearer sk-ping")
+	}
+}
+
+// The token must never appear in the backend's identity, which callers log
+// and display.
+func TestOllamaNameDoesNotLeakTheToken(t *testing.T) {
+	b, err := newOllamaBackend("https://example.invalid", "m", 10, "sk-secret-value", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(b.Name(), "sk-secret-value") {
+		t.Fatalf("Name() leaks the API key: %q", b.Name())
+	}
+}
+
+func TestConfigWithAPIKeyAndTimeout(t *testing.T) {
+	cfg := DefaultConfig().WithAPIKey("sk-abc")
+	if cfg.APIKey != "sk-abc" {
+		t.Errorf("WithAPIKey did not set the key: %+v", cfg)
+	}
+
+	if got := DefaultConfig().requestTimeout(); got != defaultRequestTimeout {
+		t.Errorf("default requestTimeout() = %v, want %v", got, defaultRequestTimeout)
+	}
+	cfg.TimeoutSec = 300
+	if got := cfg.requestTimeout(); got != 300*time.Second {
+		t.Errorf("requestTimeout() = %v, want 5m", got)
+	}
+}
+
+// The API key must not be serialised into a config file by accident.
+func TestAPIKeyIsNotMarshalled(t *testing.T) {
+	out, err := json.Marshal(DefaultConfig().WithAPIKey("sk-secret-value"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "sk-secret-value") {
+		t.Fatalf("Config JSON contains the API key: %s", out)
 	}
 }

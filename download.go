@@ -1,6 +1,7 @@
 package gollum
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -29,12 +30,55 @@ func DefaultModelPath() string {
 	return filepath.Join(DefaultModelDir, DefaultModelName)
 }
 
+// DownloadProgress reports how far a model download has got. Total is 0 when
+// the server sends no Content-Length, in which case only Downloaded is
+// meaningful — show bytes, not a percentage.
+type DownloadProgress struct {
+	Downloaded int64
+	Total      int64
+}
+
 // DownloadModel downloads a GGUF model file from the given URL to destDir.
-// If url is empty, the default model is downloaded.
-// configChecksum is an optional SHA256 hex digest from the user's config; if empty,
-// the hardcoded hash (for the default model) or Hugging Face API is used.
-// It prints progress to stdout and returns the full path to the downloaded file.
+//
+// It prints progress to stdout, which suits a CLI. A GUI consumer wants
+// DownloadModelContext instead: stdout is invisible in a windowed application,
+// and this signature has no way to cancel a multi-gigabyte transfer.
 func DownloadModel(url, destDir, configChecksum string) (string, error) {
+	return DownloadModelContext(context.Background(), url, destDir, configChecksum, printProgress())
+}
+
+// printProgress returns the stdout reporter DownloadModel uses, matching the
+// output this package produced before progress became a callback.
+func printProgress() func(DownloadProgress) {
+	lastPct := -1
+	return func(p DownloadProgress) {
+		if p.Total <= 0 {
+			return
+		}
+		pct := int(p.Downloaded * 100 / p.Total)
+		if pct != lastPct && pct%5 == 0 {
+			lastPct = pct
+			fmt.Printf("\r  Progress: %d%% (%.0f / %.0f MB)",
+				pct,
+				float64(p.Downloaded)/(1024*1024),
+				float64(p.Total)/(1024*1024))
+		}
+	}
+}
+
+// DownloadModelContext downloads a GGUF model, reporting progress through
+// onProgress (which may be nil) and honouring ctx.
+//
+// Cancelling ctx aborts the transfer promptly and removes the partial file, so
+// a cancelled download leaves nothing behind for DiscoverModel-style lookups
+// to trip over. The download is written to "<dest>.tmp" and renamed into place
+// only after the checksum verifies, so an interrupted run can never leave a
+// truncated file at the real path.
+//
+// If url is empty, the default model is downloaded. configChecksum is an
+// optional SHA256 hex digest from the user's config; if empty, the hardcoded
+// hash (for the default model) or the Hugging Face API is used.
+func DownloadModelContext(ctx context.Context, url, destDir, configChecksum string, onProgress func(DownloadProgress)) (string, error) {
 	if url == "" {
 		url = DefaultModelURL
 	}
@@ -60,8 +104,14 @@ func DownloadModel(url, destDir, configChecksum string) (string, error) {
 	fmt.Printf("Downloading model from:\n  %s\n", url)
 	fmt.Printf("Destination: %s\n", destPath)
 
+	// The timeout is a backstop for a stalled transfer; ctx is what a caller
+	// uses to cancel deliberately.
 	client := &http.Client{Timeout: 30 * time.Minute}
-	resp, err := client.Get(url)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", fmt.Errorf("download failed: %w", err)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("download failed: %w", err)
 	}
@@ -79,16 +129,26 @@ func DownloadModel(url, destDir, configChecksum string) (string, error) {
 
 	totalSize := resp.ContentLength
 	written, err := io.Copy(file, &progressWriter{
-		reader: resp.Body,
-		total:  totalSize,
+		ctx:      ctx,
+		reader:   resp.Body,
+		total:    totalSize,
+		onUpdate: onProgress,
 	})
 	file.Close()
 	if err != nil {
 		os.Remove(tmpPath)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", fmt.Errorf("download cancelled: %w", ctxErr)
+		}
 		return "", fmt.Errorf("download interrupted: %w", err)
 	}
 
 	// Determine expected checksum and verify integrity.
+	if err := ctx.Err(); err != nil {
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("download cancelled: %w", err)
+	}
+
 	expectedHash := resolveExpectedChecksum(url, configChecksum)
 	if expectedHash != "" {
 		fmt.Print("\nVerifying checksum...")
@@ -206,25 +266,46 @@ func fetchHFChecksum(url string) (string, error) {
 	return "", fmt.Errorf("file %s not found in HF tree response", filename)
 }
 
-// progressWriter wraps an io.Reader to print download progress.
+// progressWriter wraps an io.Reader to report download progress and to make
+// the transfer cancellable.
+//
+// The ctx check lives here rather than only in the HTTP layer because
+// io.Copy's loop is where a multi-gigabyte body is actually consumed: that is
+// the point at which a cancelled download stops promptly instead of running to
+// completion.
 type progressWriter struct {
-	reader  io.Reader
-	total   int64
-	written int64
-	lastPct int
+	ctx      context.Context
+	reader   io.Reader
+	total    int64
+	written  int64
+	onUpdate func(DownloadProgress)
+	lastCall time.Time
 }
 
+// progressInterval throttles callbacks. A Read returns on the order of tens of
+// kilobytes, so an un-throttled callback fires tens of thousands of times for
+// a multi-gigabyte model — enough to swamp a GUI consumer's event bus with
+// updates far finer than any progress bar can show. Time-based rather than
+// percentage-based so a download with no Content-Length still reports.
+const progressInterval = 100 * time.Millisecond
+
 func (pw *progressWriter) Read(p []byte) (int, error) {
+	if pw.ctx != nil {
+		if err := pw.ctx.Err(); err != nil {
+			return 0, err
+		}
+	}
 	n, err := pw.reader.Read(p)
 	pw.written += int64(n)
-	if pw.total > 0 {
-		pct := int(pw.written * 100 / pw.total)
-		if pct != pw.lastPct && pct%5 == 0 {
-			pw.lastPct = pct
-			fmt.Printf("\r  Progress: %d%% (%.0f / %.0f MB)",
-				pct,
-				float64(pw.written)/(1024*1024),
-				float64(pw.total)/(1024*1024))
+
+	if pw.onUpdate != nil {
+		// Always report the final state, whatever the throttle says: a
+		// progress bar that stops at 99% because the last update was rate
+		// limited is worse than no bar at all.
+		done := err != nil
+		if done || time.Since(pw.lastCall) >= progressInterval {
+			pw.lastCall = time.Now()
+			pw.onUpdate(DownloadProgress{Downloaded: pw.written, Total: pw.total})
 		}
 	}
 	return n, err

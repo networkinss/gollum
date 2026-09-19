@@ -16,7 +16,10 @@ type ollamaBackend struct {
 	endpoint  string
 	model     string
 	maxTokens int
-	client    *http.Client
+	// apiKey, when non-empty, is sent as a bearer token. A local Ollama needs
+	// none; hosted Ollama-compatible endpoints require one.
+	apiKey string
+	client *http.Client
 }
 
 // ollamaGenerateRequest is the request body for /api/generate.
@@ -35,19 +38,44 @@ type ollamaGenerateResponse struct {
 	Error    string `json:"error,omitempty"`
 }
 
-func newOllamaBackend(endpoint, model string, maxTokens int) (*ollamaBackend, error) {
+// defaultRequestTimeout bounds a single generation. Two minutes suits a small
+// local model; a large or hosted one can need considerably longer, which is
+// what Config.TimeoutSec is for.
+const defaultRequestTimeout = 120 * time.Second
+
+func newOllamaBackend(endpoint, model string, maxTokens int, apiKey string, timeout time.Duration) (*ollamaBackend, error) {
 	if model == "" {
 		model = "llama3.2:3b"
 	}
 	if maxTokens <= 0 {
 		maxTokens = 512
 	}
+	if timeout <= 0 {
+		timeout = defaultRequestTimeout
+	}
 	return &ollamaBackend{
 		endpoint:  endpoint,
 		model:     model,
 		maxTokens: maxTokens,
-		client:    &http.Client{Timeout: 120 * time.Second},
+		apiKey:    apiKey,
+		client:    &http.Client{Timeout: timeout},
 	}, nil
+}
+
+// setAuth applies the bearer token when one is configured. Every request path
+// must call it, including the health check: a hosted endpoint answers an
+// unauthenticated /api/version with 401, which would otherwise make Available()
+// report a perfectly good backend as down.
+func (o *ollamaBackend) setAuth(req *http.Request) {
+	if o.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+o.apiKey)
+	}
+}
+
+// setHeaders applies what a JSON request body needs, plus auth.
+func (o *ollamaBackend) setHeaders(req *http.Request) {
+	req.Header.Set("Content-Type", "application/json")
+	o.setAuth(req)
 }
 
 func (o *ollamaBackend) Name() string {
@@ -73,7 +101,7 @@ func (o *ollamaBackend) Analyze(ctx context.Context, systemPrompt, userPrompt st
 	if err != nil {
 		return "", fmt.Errorf("ollama: failed to create request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	o.setHeaders(req)
 
 	resp, err := o.client.Do(req)
 	if err != nil {
@@ -128,7 +156,7 @@ func (o *ollamaBackend) AnalyzeStream(ctx context.Context, systemPrompt, userPro
 	if err != nil {
 		return fmt.Errorf("ollama: failed to create request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	o.setHeaders(req)
 
 	resp, err := o.client.Do(req)
 	if err != nil {
@@ -184,6 +212,7 @@ func (o *ollamaBackend) Available() bool {
 	if err != nil {
 		return false
 	}
+	o.setAuth(req)
 	resp, err := o.client.Do(req)
 	if err != nil {
 		return false

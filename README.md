@@ -81,15 +81,36 @@ Set `Config.Backend` to control which backend is used:
 
 ```go
 gollum.Config{
-	Backend:   "auto",                    // "auto", "ollama", "remote", "embedded"
-	ModelPath: "/path/to/model.gguf",     // Embedded backend: path to GGUF file
-	Model:     "llama3.2:3b",             // Ollama backend: model name
-	Endpoint:  "http://host:11434",       // Remote backend: Ollama API URL
-	MaxTokens: 512,                       // Maximum response tokens
-	Threads:   4,                         // CPU threads (embedded backend)
-	Checksum:  "",                        // SHA256 for model download verification
+	Backend:    "auto",                    // "auto", "ollama", "remote", "embedded"
+	ModelPath:  "/path/to/model.gguf",     // Embedded backend: path to GGUF file
+	Model:      "llama3.2:3b",             // Ollama backend: model name
+	Endpoint:   "http://host:11434",       // Remote backend: Ollama API URL
+	MaxTokens:  512,                       // Maximum response tokens
+	Threads:    4,                         // CPU threads (embedded backend)
+	Checksum:   "",                        // SHA256 for model download verification
+	TimeoutSec: 0,                         // Per-request timeout; 0 = 120s
 }
 ```
+
+### Authenticated endpoints
+
+A local Ollama needs no credentials. A hosted Ollama-compatible endpoint does,
+and `APIKey` supplies it as a bearer token on every request — generation,
+streaming and the `Available()` health check alike, since an unauthenticated
+ping to such a service answers 401 and would report a working backend as down.
+
+```go
+cfg := gollum.DefaultConfig().WithAPIKey(os.Getenv("OLLAMA_API_KEY"))
+cfg.Backend = "remote"
+cfg.Endpoint = "https://example.com"
+cfg.TimeoutSec = 300 // hosted models can be slower to first token
+```
+
+`WithAPIKey` is a builder rather than a parameter on `ConfigFromValues`,
+because that function's signature is published API and consumers already call
+it positionally. The key is `json:"-"`, so it is never written out with the
+rest of a serialised config — storing it is the consumer's decision to make
+deliberately.
 
 ## Model download
 
@@ -101,6 +122,29 @@ Custom model:
 ```go
 path, err := gollum.DownloadModel("https://huggingface.co/..../model.gguf", "/path/to/models", "")
 ```
+
+`DownloadModel` prints progress to stdout, which suits a CLI. **A GUI consumer
+wants `DownloadModelContext`**: stdout is invisible in a windowed application,
+and a multi-gigabyte transfer needs to be cancellable.
+
+```go
+path, err := gollum.DownloadModelContext(ctx, url, destDir, checksum,
+	func(p gollum.DownloadProgress) {
+		// p.Total is 0 when the server sends no Content-Length —
+		// show bytes rather than a percentage in that case.
+		emit(p.Downloaded, p.Total)
+	})
+```
+
+Callbacks are throttled to roughly one per 100ms, because a read returns tens
+of kilobytes at a time and an un-throttled callback fires tens of thousands of
+times for a real model. The final state is always reported, throttle or not, so
+a progress bar cannot stop short of the end.
+
+Cancelling `ctx` aborts the transfer promptly and removes the partial file. The
+download is written to `<dest>.tmp` and renamed into place only once the
+checksum verifies, so an interrupted or corrupt download never leaves a
+truncated file where a model discovery would find it.
 
 ## License
 

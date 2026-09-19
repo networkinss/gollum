@@ -31,6 +31,32 @@ type Backend interface {
 	Close() error
 }
 
+// Sampling defaults for the embedded backend.
+//
+// Declared here rather than in backend_embedded.go, which is behind
+// `-tags llm`: these are the library's sampling policy, and a test that can
+// only run in a tagged build is a test that will not run in CI for the
+// default one. The values are used only by the embedded backend. Low temperature on purpose:
+// this library's callers analyse text rather than write fiction, and a model
+// that invents detail about a document is worse than one that is dull.
+const (
+	defaultTemperature = 0.3
+	defaultTopK        = 40
+	defaultTopP        = 0.9
+	defaultMaxTokens   = 512
+	// llama.cpp defaults the repetition penalty to 1.0, which is to say off.
+	// Combined with a low temperature that reliably produces degenerate
+	// loops: the model finds a phrase it likes and emits it until the token
+	// limit stops it. 1.1 over the last 64 tokens is llama.cpp's own
+	// conventional setting and costs nothing when the model was not going to
+	// repeat itself anyway.
+	//
+	// The Ollama backend sets no equivalent because Ollama already applies
+	// its own repetition default server-side; this defect is embedded-only.
+	defaultRepeatPenalty = 1.1
+	defaultPenaltyLastN  = 64
+)
+
 // GenerateOptions carries per-request overrides.
 //
 // It exists because the alternative does not work: MaxTokens and the sampling
@@ -50,6 +76,19 @@ type GenerateOptions struct {
 	Temperature float32
 	TopK        int
 	TopP        float32
+	// RepeatPenalty discourages the model from repeating itself. 1.0 is no
+	// penalty; 1.1 is the conventional value. 0 uses the backend's default.
+	//
+	// This matters more than it sounds. llama.cpp defaults it to 1.0 —
+	// disabled — and a small model at low temperature with no penalty will
+	// happily emit the same sentence until it runs out of tokens. That is not
+	// a hypothetical: a 3B model summarising an 8 KB document produced
+	// "The updater is not built inside Edithor / The updater is separate from
+	// Edithor" repeated until the limit stopped it.
+	RepeatPenalty float32
+	// PenaltyLastN is how many recent tokens the penalty considers.
+	// 0 uses the backend's default.
+	PenaltyLastN int
 }
 
 // IsZero reports whether every field is unset, in which case the backend's

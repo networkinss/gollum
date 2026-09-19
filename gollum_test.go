@@ -90,3 +90,19 @@ func TestNew_OllamaBackend(t *testing.T) {
 		t.Error("expected non-nil backend")
 	}
 }
+
+// The embedded backend must NOT leave repetition unpenalised. llama.cpp
+// defaults to 1.0 (off), and a small model at low temperature with no penalty
+// loops until it runs out of tokens — observed in practice, not theory.
+//
+// Asserted on the constants because the backend itself needs -tags llm and a
+// real model; this at least fails if someone "tidies" the default back to
+// zero or to 1.0.
+func TestEmbeddedRepetitionDefaultsAreActive(t *testing.T) {
+	if defaultRepeatPenalty <= 1.0 {
+		t.Errorf("defaultRepeatPenalty = %v; at or below 1.0 is no penalty at all", defaultRepeatPenalty)
+	}
+	if defaultPenaltyLastN <= 0 {
+		t.Errorf("defaultPenaltyLastN = %d; a penalty over zero tokens does nothing", defaultPenaltyLastN)
+	}
+}

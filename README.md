@@ -137,6 +137,19 @@ published contract and widening its signatures would break every third-party
 implementation. Both built-in backends satisfy it, enforced by compile-time
 assertions rather than by hope.
 
+### Repetition
+
+The embedded backend applies a repetition penalty of 1.1 over the last 64
+tokens by default. **This is not a stylistic preference.** llama.cpp defaults
+the penalty to 1.0 — disabled — and a small model at low temperature with
+nothing discouraging repeats will emit the same sentence until it runs out of
+tokens. Observed with a 3B model summarising an 8 KB document: two sentences,
+alternating, to the token limit.
+
+Override with `RepeatPenalty` and `PenaltyLastN` if a model needs different
+handling. The Ollama backend sends neither unless you ask, because Ollama
+applies its own server-side.
+
 Note the sampling defaults differ by backend, on purpose. The embedded engine
 applies temperature 0.3 / top-k 40 / top-p 0.9 because llama.cpp needs *some*
 value; the Ollama backend sends no sampling keys at all unless you override

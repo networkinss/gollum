@@ -322,3 +322,134 @@ func TestAPIKeyIsNotMarshalled(t *testing.T) {
 		t.Fatalf("Config JSON contains the API key: %s", out)
 	}
 }
+
+// captureOptions serves /api/generate and records the options map it was sent.
+func captureOptions(t *testing.T, seen *map[string]any) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Options map[string]any `json:"options"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		*seen = body.Options
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"response":"ok","done":true}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// The point of per-request options: a caller can cap one answer without
+// rebuilding the backend, which on the embedded engine means reloading a
+// multi-gigabyte model.
+func TestPerRequestMaxTokensOverridesTheConfiguredValue(t *testing.T) {
+	var seen map[string]any
+	srv := captureOptions(t, &seen)
+
+	b, err := newOllamaBackend(srv.URL, "test-model", 999, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.AnalyzeWithOptions(context.Background(), "s", "u", GenerateOptions{MaxTokens: 42}); err != nil {
+		t.Fatal(err)
+	}
+	if got := seen["num_predict"]; got != float64(42) {
+		t.Fatalf("num_predict = %v, want 42 (the per-request override)", got)
+	}
+}
+
+// A zero GenerateOptions must be exactly the old behaviour.
+func TestZeroOptionsUsesTheConfiguredValue(t *testing.T) {
+	var seen map[string]any
+	srv := captureOptions(t, &seen)
+
+	b, err := newOllamaBackend(srv.URL, "test-model", 77, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.AnalyzeWithOptions(context.Background(), "s", "u", GenerateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := seen["num_predict"]; got != float64(77) {
+		t.Fatalf("num_predict = %v, want the configured 77", got)
+	}
+	// Sampling keys must be absent entirely, so the model's own defaults
+	// apply rather than numbers this library invented.
+	for _, k := range []string{"temperature", "top_k", "top_p"} {
+		if _, present := seen[k]; present {
+			t.Errorf("zero options sent %q; the model's default should apply", k)
+		}
+	}
+}
+
+// The plain Analyze/AnalyzeStream must keep working untouched — they are the
+// published contract and existing consumers call them.
+func TestPlainAnalyzeStillUsesConfiguredValue(t *testing.T) {
+	var seen map[string]any
+	srv := captureOptions(t, &seen)
+
+	b, err := newOllamaBackend(srv.URL, "test-model", 55, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Analyze(context.Background(), "s", "u"); err != nil {
+		t.Fatal(err)
+	}
+	if got := seen["num_predict"]; got != float64(55) {
+		t.Fatalf("num_predict = %v, want 55", got)
+	}
+}
+
+// Options must reach the streaming path too — it is a separate request body,
+// and that is exactly where a parameter gets forgotten.
+func TestPerRequestOptionsReachTheStreamingPath(t *testing.T) {
+	var seen map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Options map[string]any `json:"options"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		seen = body.Options
+		w.Write([]byte(`{"response":"hi","done":true}` + "\n"))
+	}))
+	defer srv.Close()
+
+	b, err := newOllamaBackend(srv.URL, "test-model", 999, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = b.AnalyzeStreamWithOptions(context.Background(), "s", "u",
+		func(string) bool { return true },
+		GenerateOptions{MaxTokens: 13, Temperature: 0.9, TopK: 7, TopP: 0.5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := seen["num_predict"]; got != float64(13) {
+		t.Errorf("num_predict = %v, want 13", got)
+	}
+	if got := seen["temperature"]; got != 0.9 {
+		t.Errorf("temperature = %v, want 0.9", got)
+	}
+	if got := seen["top_k"]; got != float64(7) {
+		t.Errorf("top_k = %v, want 7", got)
+	}
+}
+
+func TestGenerateOptionsIsZero(t *testing.T) {
+	if !(GenerateOptions{}).IsZero() {
+		t.Error("the zero value does not report IsZero")
+	}
+	if (GenerateOptions{MaxTokens: 1}).IsZero() {
+		t.Error("a populated value reports IsZero")
+	}
+}
+
+func TestAsOptionedBackend(t *testing.T) {
+	b, err := newOllamaBackend("http://example.invalid", "m", 10, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := AsOptionedBackend(b); !ok {
+		t.Fatal("the Ollama backend does not satisfy OptionedBackend")
+	}
+}

@@ -62,6 +62,29 @@ func newOllamaBackend(endpoint, model string, maxTokens int, apiKey string, time
 	}, nil
 }
 
+// genOptions builds Ollama's per-request options map, applying overrides on
+// top of the backend's configured values. One place, so a parameter cannot be
+// added to the non-streaming path and forgotten in the streaming one.
+func (o *ollamaBackend) genOptions(opts GenerateOptions) map[string]any {
+	m := map[string]any{"num_predict": o.maxTokens}
+	if opts.MaxTokens > 0 {
+		m["num_predict"] = opts.MaxTokens
+	}
+	// Sampling has no backend-level default here: Ollama applies the model's
+	// own unless told otherwise, which is the better default than a number
+	// this library invents.
+	if opts.Temperature > 0 {
+		m["temperature"] = opts.Temperature
+	}
+	if opts.TopK > 0 {
+		m["top_k"] = opts.TopK
+	}
+	if opts.TopP > 0 {
+		m["top_p"] = opts.TopP
+	}
+	return m
+}
+
 // setAuth applies the bearer token when one is configured. Every request path
 // must call it, including the health check: a hosted endpoint answers an
 // unauthenticated /api/version with 401, which would otherwise make Available()
@@ -83,14 +106,17 @@ func (o *ollamaBackend) Name() string {
 }
 
 func (o *ollamaBackend) Analyze(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
+	return o.AnalyzeWithOptions(ctx, systemPrompt, userPrompt, GenerateOptions{})
+}
+
+// AnalyzeWithOptions is Analyze with per-request overrides.
+func (o *ollamaBackend) AnalyzeWithOptions(ctx context.Context, systemPrompt, userPrompt string, opts GenerateOptions) (string, error) {
 	reqBody := ollamaGenerateRequest{
-		Model:  o.model,
-		System: systemPrompt,
-		Prompt: userPrompt,
-		Stream: false,
-		Options: map[string]any{
-			"num_predict": o.maxTokens,
-		},
+		Model:   o.model,
+		System:  systemPrompt,
+		Prompt:  userPrompt,
+		Stream:  false,
+		Options: o.genOptions(opts),
 	}
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
@@ -135,17 +161,20 @@ func (o *ollamaBackend) Analyze(ctx context.Context, systemPrompt, userPrompt st
 // onToken, or cancelling ctx, cancels the underlying HTTP request so the
 // server stops generating rather than the client just stopping reading.
 func (o *ollamaBackend) AnalyzeStream(ctx context.Context, systemPrompt, userPrompt string, onToken func(string) bool) error {
+	return o.AnalyzeStreamWithOptions(ctx, systemPrompt, userPrompt, onToken, GenerateOptions{})
+}
+
+// AnalyzeStreamWithOptions is AnalyzeStream with per-request overrides.
+func (o *ollamaBackend) AnalyzeStreamWithOptions(ctx context.Context, systemPrompt, userPrompt string, onToken func(string) bool, opts GenerateOptions) error {
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	reqBody := ollamaGenerateRequest{
-		Model:  o.model,
-		System: systemPrompt,
-		Prompt: userPrompt,
-		Stream: true,
-		Options: map[string]any{
-			"num_predict": o.maxTokens,
-		},
+		Model:   o.model,
+		System:  systemPrompt,
+		Prompt:  userPrompt,
+		Stream:  true,
+		Options: o.genOptions(opts),
 	}
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {

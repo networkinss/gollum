@@ -112,6 +112,37 @@ it positionally. The key is `json:"-"`, so it is never written out with the
 rest of a serialised config — storing it is the consumer's decision to make
 deliberately.
 
+## Per-request options
+
+`MaxTokens` and the sampling parameters are bound when a backend is
+constructed, so varying them per request would mean building a new backend —
+and on the embedded engine that means reloading the model from disk. A caller
+that wants a short answer for one action and a long one for the next should
+not pay several seconds for it.
+
+```go
+if ob, ok := gollum.AsOptionedBackend(backend); ok {
+	err = ob.AnalyzeStreamWithOptions(ctx, system, user, onToken,
+		gollum.GenerateOptions{MaxTokens: 200})
+}
+```
+
+A zero field means "use the value this backend was configured with", so the
+zero `GenerateOptions` is exactly the behaviour of plain `Analyze` /
+`AnalyzeStream` — which keep working unchanged and are still the right call
+when there is nothing to override.
+
+`OptionedBackend` is additive, like `StreamingBackend`: `Backend` is the
+published contract and widening its signatures would break every third-party
+implementation. Both built-in backends satisfy it, enforced by compile-time
+assertions rather than by hope.
+
+Note the sampling defaults differ by backend, on purpose. The embedded engine
+applies temperature 0.3 / top-k 40 / top-p 0.9 because llama.cpp needs *some*
+value; the Ollama backend sends no sampling keys at all unless you override
+them, so the model's own defaults apply rather than numbers this library
+invented.
+
 ## Model download
 
 ```go

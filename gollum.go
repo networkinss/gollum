@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // Sentinel errors for distinguishing failure modes.
@@ -77,6 +78,32 @@ type Config struct {
 	Verbose bool `json:"-"`
 	// Checksum is the expected SHA256 hex digest for the model file.
 	Checksum string `json:"checksum"`
+	// APIKey is a bearer token for an Ollama-compatible endpoint that needs
+	// one (hosted services do; a local daemon does not). Never logged, and
+	// never included in Backend.Name().
+	APIKey string `json:"-"`
+	// TimeoutSec bounds a single generation. 0 uses the default (120s), which
+	// suits a small local model; a large or hosted one can need longer.
+	TimeoutSec int `json:"timeout_sec"`
+}
+
+// WithAPIKey returns a copy of c carrying the given bearer token.
+//
+// A builder rather than a parameter on ConfigFromValues: that function's
+// signature is part of the published API and consumers already call it
+// positionally, so widening it would break them for a field most callers
+// never set.
+func (c Config) WithAPIKey(key string) Config {
+	c.APIKey = key
+	return c
+}
+
+// requestTimeout returns the configured generation timeout, or the default.
+func (c Config) requestTimeout() time.Duration {
+	if c.TimeoutSec <= 0 {
+		return defaultRequestTimeout
+	}
+	return time.Duration(c.TimeoutSec) * time.Second
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -111,9 +138,9 @@ func New(cfg Config) (Backend, error) {
 		if cfg.Endpoint == "" {
 			return nil, fmt.Errorf("gollum: remote backend requires endpoint")
 		}
-		return newOllamaBackend(cfg.Endpoint, cfg.Model, cfg.MaxTokens)
+		return newOllamaBackend(cfg.Endpoint, cfg.Model, cfg.MaxTokens, cfg.APIKey, cfg.requestTimeout())
 	case "ollama":
-		return newOllamaBackend("http://localhost:11434", cfg.Model, cfg.MaxTokens)
+		return newOllamaBackend(defaultOllamaEndpoint, cfg.Model, cfg.MaxTokens, cfg.APIKey, cfg.requestTimeout())
 	case "embedded":
 		return newEmbeddedBackend(cfg)
 	case "auto", "":
@@ -126,7 +153,7 @@ func New(cfg Config) (Backend, error) {
 // autoDetect probes for a local Ollama instance, then falls back to embedded.
 func autoDetect(cfg Config) (Backend, error) {
 	if endpoint, ok := DiscoverLocalOllama(); ok {
-		b, err := newOllamaBackend(endpoint, cfg.Model, cfg.MaxTokens)
+		b, err := newOllamaBackend(endpoint, cfg.Model, cfg.MaxTokens, cfg.APIKey, cfg.requestTimeout())
 		if err == nil {
 			return b, nil
 		}

@@ -85,16 +85,6 @@ func (e *embeddedBackend) AnalyzeStream(ctx context.Context, systemPrompt, userP
 	return e.AnalyzeStreamWithOptions(ctx, systemPrompt, userPrompt, onToken, GenerateOptions{})
 }
 
-// Sampling defaults for the embedded backend. Low temperature on purpose:
-// this library's callers analyse text rather than write fiction, and a model
-// that invents detail about a document is worse than one that is dull.
-const (
-	defaultTemperature = 0.3
-	defaultTopK        = 40
-	defaultTopP        = 0.9
-	defaultMaxTokens   = 512
-)
-
 // AnalyzeStreamWithOptions is AnalyzeStream with per-request overrides.
 func (e *embeddedBackend) AnalyzeStreamWithOptions(ctx context.Context, systemPrompt, userPrompt string, onToken func(string) bool, opts GenerateOptions) error {
 	prompt := systemPrompt + "\n\n" + userPrompt
@@ -122,6 +112,14 @@ func (e *embeddedBackend) AnalyzeStreamWithOptions(ctx context.Context, systemPr
 	if opts.TopP > 0 {
 		topP = opts.TopP
 	}
+	repeatPenalty := float32(defaultRepeatPenalty)
+	if opts.RepeatPenalty > 0 {
+		repeatPenalty = opts.RepeatPenalty
+	}
+	penaltyLastN := defaultPenaltyLastN
+	if opts.PenaltyLastN > 0 {
+		penaltyLastN = opts.PenaltyLastN
+	}
 
 	err := e.ctx.GenerateStream(prompt, func(token string) bool {
 		if ctx.Err() != nil {
@@ -133,6 +131,8 @@ func (e *embeddedBackend) AnalyzeStreamWithOptions(ctx context.Context, systemPr
 		llama.WithTemperature(temperature),
 		llama.WithTopK(topK),
 		llama.WithTopP(topP),
+		llama.WithRepeatPenalty(repeatPenalty),
+		llama.WithPenaltyLastN(penaltyLastN),
 	)
 	if err != nil {
 		return fmt.Errorf("embedded: inference failed: %w", err)

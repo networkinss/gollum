@@ -82,6 +82,15 @@ func (o *ollamaBackend) genOptions(opts GenerateOptions) map[string]any {
 	if opts.TopP > 0 {
 		m["top_p"] = opts.TopP
 	}
+	// No default here, unlike the embedded backend: Ollama applies its own
+	// repetition penalty server-side, so sending nothing gets sensible
+	// behaviour. Only an explicit override is forwarded.
+	if opts.RepeatPenalty > 0 {
+		m["repeat_penalty"] = opts.RepeatPenalty
+	}
+	if opts.PenaltyLastN > 0 {
+		m["repeat_last_n"] = opts.PenaltyLastN
+	}
 	return m
 }
 

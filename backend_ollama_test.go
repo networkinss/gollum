@@ -453,3 +453,45 @@ func TestAsOptionedBackend(t *testing.T) {
 		t.Fatal("the Ollama backend does not satisfy OptionedBackend")
 	}
 }
+
+// Ollama applies its own repetition penalty server-side, so gollum must send
+// nothing unless asked — inventing a value would override a default the
+// server operator may have tuned.
+func TestOllamaSendsNoRepeatPenaltyByDefault(t *testing.T) {
+	var seen map[string]any
+	srv := captureOptions(t, &seen)
+
+	b, err := newOllamaBackend(srv.URL, "m", 10, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.AnalyzeWithOptions(context.Background(), "s", "u", GenerateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"repeat_penalty", "repeat_last_n"} {
+		if _, present := seen[k]; present {
+			t.Errorf("sent %q without being asked; Ollama's own default should apply", k)
+		}
+	}
+}
+
+func TestOllamaForwardsAnExplicitRepeatPenalty(t *testing.T) {
+	var seen map[string]any
+	srv := captureOptions(t, &seen)
+
+	b, err := newOllamaBackend(srv.URL, "m", 10, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = b.AnalyzeWithOptions(context.Background(), "s", "u",
+		GenerateOptions{RepeatPenalty: 1.25, PenaltyLastN: 128})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := seen["repeat_penalty"]; got != 1.25 {
+		t.Errorf("repeat_penalty = %v, want 1.25", got)
+	}
+	if got := seen["repeat_last_n"]; got != float64(128) {
+		t.Errorf("repeat_last_n = %v, want 128", got)
+	}
+}

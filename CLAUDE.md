@@ -37,6 +37,27 @@ The practical consequence: **a change in this repo does not reach edith until it
 
 `Backend` (`Name()`, `Analyze(ctx, systemPrompt, userPrompt) (string, error)`, `Available()`, `Close()`) is the only public contract consumers depend on today. `backend_embedded.go`'s `Analyze` currently **discards its `context.Context` parameter** — cancellation is not honoured on the embedded backend. A `StreamingBackend` (`Backend` plus `AnalyzeStream(ctx, systemPrompt, userPrompt, onToken func(string) bool) error`) is planned as an additive interface for edith's Pro AI feature; land and freeze its shape here, in this repo, before the first tag — don't let it get designed ad hoc in a consumer.
 
+## Capability interfaces
+
+`Backend` is the published contract and must not grow methods or change
+signatures — third parties implement it. Capabilities are added as **additive
+interfaces** that callers type-assert to:
+
+- `StreamingBackend` — `AnalyzeStream`, tokens as they are produced.
+- `OptionedBackend` — `AnalyzeWithOptions` / `AnalyzeStreamWithOptions`, taking
+  a `GenerateOptions` whose zero value means "use the configured values".
+
+Both built-in backends implement both, enforced by `var _ OptionedBackend =
+(*ollamaBackend)(nil)` style assertions in `gollum.go` and `backend_embedded.go`
+(the embedded one has to live in the tagged file, since the type only exists
+behind `-tags llm`). Those assertions matter more than they look: a backend
+that quietly stopped implementing a capability would fall back to
+configured-only behaviour at runtime with no error, so per-request options
+would be silently ignored rather than refused.
+
+When adding a capability, follow the same shape and add the assertions in the
+same change.
+
 ## Testing
 
 ```bash

@@ -31,6 +31,55 @@ type Backend interface {
 	Close() error
 }
 
+// GenerateOptions carries per-request overrides.
+//
+// It exists because the alternative does not work: MaxTokens and the sampling
+// parameters are bound when a backend is constructed, so varying them per
+// request means building a new backend — which, on the embedded engine, means
+// reloading the model from disk. A consumer that wants a short answer for one
+// action and a long one for the next would pay several seconds for the
+// privilege.
+//
+// A zero field means "use the value this backend was configured with", so the
+// zero GenerateOptions is exactly the old behaviour.
+type GenerateOptions struct {
+	// MaxTokens caps this response. 0 uses the backend's configured value.
+	MaxTokens int
+	// Temperature, TopK and TopP override sampling for this request.
+	// 0 uses the backend's default for each, independently.
+	Temperature float32
+	TopK        int
+	TopP        float32
+}
+
+// IsZero reports whether every field is unset, in which case the backend's
+// own configuration applies unchanged.
+func (o GenerateOptions) IsZero() bool {
+	return o == GenerateOptions{}
+}
+
+// OptionedBackend is an additive capability: a Backend that accepts
+// per-request overrides as well as its constructor-time configuration.
+//
+// Additive for the same reason StreamingBackend is: `Backend` is the published
+// contract and widening its method signatures would break every third-party
+// implementation. Both built-in backends implement this; callers should
+// type-assert (or use AsOptionedBackend) rather than assume it.
+type OptionedBackend interface {
+	Backend
+	// AnalyzeWithOptions is Analyze with per-request overrides.
+	AnalyzeWithOptions(ctx context.Context, systemPrompt, userPrompt string, opts GenerateOptions) (string, error)
+	// AnalyzeStreamWithOptions is AnalyzeStream with per-request overrides.
+	AnalyzeStreamWithOptions(ctx context.Context, systemPrompt, userPrompt string, onToken func(string) bool, opts GenerateOptions) error
+}
+
+// AsOptionedBackend type-asserts b to OptionedBackend, returning ok=false if
+// the concrete backend does not accept per-request overrides.
+func AsOptionedBackend(b Backend) (OptionedBackend, bool) {
+	ob, ok := b.(OptionedBackend)
+	return ob, ok
+}
+
 // StreamingBackend is an additive capability: a Backend that can also deliver
 // tokens incrementally as they're generated, instead of only the final result.
 //
@@ -164,3 +213,12 @@ func autoDetect(cfg Config) (Backend, error) {
 	}
 	return b, nil
 }
+
+// Compile-time assertions. Both built-in backends must satisfy every
+// capability interface: a backend that silently stopped implementing one
+// would fall back to configured-only behaviour at runtime with no error, and
+// per-request options would be ignored rather than refused.
+var (
+	_ StreamingBackend = (*ollamaBackend)(nil)
+	_ OptionedBackend  = (*ollamaBackend)(nil)
+)
